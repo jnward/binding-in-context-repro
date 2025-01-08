@@ -7,11 +7,11 @@ from tasks.capitals import CAPITAL_MAP, NAMES, capitals_generator
 from functools import partial
 from tqdm import tqdm
 
-device = "mps"
+device = "cuda"
 
 # %%
 model = HookedTransformer.from_pretrained_no_processing(
-    "pythia-410M",
+    "pythia-1B",
     device=device,
     dtype=torch.bfloat16
 )
@@ -58,13 +58,13 @@ def patch_all_acts_at_positions(target_ids: torch.Tensor, source_cache: Activati
 # %%
 my_capitals_generator = capitals_generator()
 capitals_examples = [
-    next(my_capitals_generator) for _ in range(16)
+    next(my_capitals_generator) for _ in range(8)
 ]
 
 # %%
 my_example = capitals_examples[1]
 
-def get_logit_matrices(test_example, patch_positions):
+def get_logit_matrices(test_example):
     target_context = test_example.context
     source_context = test_example.context_p
 
@@ -85,10 +85,14 @@ def get_logit_matrices(test_example, patch_positions):
     target_mask_ids = torch.ones_like(target_context_ids).squeeze() * 5
     full_query_ids = torch.cat([target_mask_ids[None, :].expand(4, -1), query_token_ids], dim=1)
 
-    corrupt_logits = patch_all_acts_at_positions(full_query_ids, source_cache, target_cache, patch_positions)
+    clean_logits = patch_all_acts_at_positions(full_query_ids, source_cache, target_cache, [])
+    a0_logits = patch_all_acts_at_positions(full_query_ids, source_cache, target_cache, [A_0_POS])
+    e0_logits = patch_all_acts_at_positions(full_query_ids, source_cache, target_cache, [E_0_POS])
+    a0e0_logits = patch_all_acts_at_positions(full_query_ids, source_cache, target_cache, [A_0_POS, E_0_POS])
     del source_cache, target_cache
 
-    answer_probs = corrupt_logits[:, -1, answer_token_ids]
+    all_logits = torch.stack([clean_logits, a0_logits, e0_logits, a0e0_logits])
+    answer_probs = all_logits[:, :, -1, answer_token_ids]  # intervention, query, answer
     return answer_probs
 
 # %%
@@ -103,41 +107,51 @@ def cleanup():
 # %%
 import plotly.express as px
 
-clean_logits = []
-a0_logits = []
-e0_logits = []
-a0e0_logits = []
+# clean_logits = []
+# a0_logits = []
+# e0_logits = []
+# a0e0_logits = []
+
+all_logits = []
 
 for example in tqdm(capitals_examples):
-    logit_matrix = get_logit_matrices(example, [])
-    clean_logits.append(logit_matrix)
+    logit_matrix = get_logit_matrices(example)
+    all_logits.append(logit_matrix)
     cleanup()
 
-clean_avg = torch.stack(clean_logits).mean(0)
-px.imshow(clean_avg.detach().float().cpu().numpy(), title="Clean").show()
+all_avg = torch.stack(all_logits).mean(0)
 
-for example in tqdm(capitals_examples):
-    logit_matrix = get_logit_matrices(example, [A_0_POS])
-    a0_logits.append(logit_matrix)
-    cleanup()
+# %%
+for grid in all_avg:
+    px.imshow(grid.detach().float().cpu().numpy()).show()
 
-a0_avg = torch.stack(a0_logits).mean(0)
-px.imshow(a0_avg.detach().float().cpu().numpy(), title="A_0").show()
+# %%
 
-for example in tqdm(capitals_examples):
-    logit_matrix = get_logit_matrices(example, [E_0_POS])
-    e0_logits.append(logit_matrix)
-    cleanup()
+# clean_avg = torch.stack(clean_logits).mean(0)
+# px.imshow(clean_avg.detach().float().cpu().numpy(), title="Clean").show()
 
-e0_avg = torch.stack(e0_logits).mean(0)
-px.imshow(e0_avg.detach().float().cpu().numpy(), title="E_0").show()
+# for example in tqdm(capitals_examples):
+#     logit_matrix = get_logit_matrices(example, [A_0_POS])
+#     a0_logits.append(logit_matrix)
+#     cleanup()
 
-for example in tqdm(capitals_examples):
-    logit_matrix = get_logit_matrices(example, [A_0_POS, E_0_POS])
-    a0e0_logits.append(logit_matrix)
-    cleanup()
+# a0_avg = torch.stack(a0_logits).mean(0)
+# px.imshow(a0_avg.detach().float().cpu().numpy(), title="A_0").show()
 
-a0e0_avg = torch.stack(a0e0_logits).mean(0)
-px.imshow(a0e0_avg.detach().float().cpu().numpy(), title="A_0, E_0").show()
+# for example in tqdm(capitals_examples):
+#     logit_matrix = get_logit_matrices(example, [E_0_POS])
+#     e0_logits.append(logit_matrix)
+#     cleanup()
+
+# e0_avg = torch.stack(e0_logits).mean(0)
+# px.imshow(e0_avg.detach().float().cpu().numpy(), title="E_0").show()
+
+# for example in tqdm(capitals_examples):
+#     logit_matrix = get_logit_matrices(example, [A_0_POS, E_0_POS])
+#     a0e0_logits.append(logit_matrix)
+#     cleanup()
+
+# a0e0_avg = torch.stack(a0e0_logits).mean(0)
+# px.imshow(a0e0_avg.detach().float().cpu().numpy(), title="A_0, E_0").show()
 
 # %%
