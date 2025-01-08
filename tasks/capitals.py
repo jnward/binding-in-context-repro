@@ -1,8 +1,12 @@
+import numpy as np
+
+np.random.seed(42)
+
 CAPITAL_MAP = {
     "China": "Beijing",
     "Russia": "Moscow",
     "Japan": "Tokyo",
-    # "Philippines": "Manila",
+    "Philippines": "Manila",
     "Egypt": "Cairo",
     "Iran": "Tehran",
     "Germany": "Berlin",
@@ -24,7 +28,7 @@ CAPITAL_MAP = {
     "Hungary": "Budapest",
     "Austria": "Vienna",
     "Israel": "Jerusalem",
-    # "Switzerland": "Bern",
+    "Switzerland": "Bern",
 }
 
 NAMES = [
@@ -52,40 +56,41 @@ NAMES = [
     "Rachel",
     "Andrew",
     "Linda",
-    # "Richard",
-    # "Barbara",
-    # "Charles",
-    # "Michelle",
-    # "Anthony",
-    # "Lisa",
-    # "Steven",
-    # "Sandra",
-    # "Kevin",
-    # "Helen",
-    # "Brian",
-    # "Ashley",
-    # "George",
-    # "Anna",
-    # "Edward",
-    # "Olivia",
-    # "Donald",
-    # "Dorothy",
-    # "Paul",
-    # "Victoria",
-    # "Mark",
-    # "Rebecca",
-    # "Kenneth",
-    # "Karen",
-    # "Stephen",
-    # "Margaret",
+    "Richard",
+    "Barbara",
+    "Charles",
+    "Michelle",
+    "Anthony",
+    "Lisa",
+    "Steven",
+    "Sandra",
+    "Kevin",
+    "Helen",
+    "Brian",
+    "Ashley",
+    "George",
+    "Anna",
+    "Edward",
+    "Olivia",
+    "Donald",
+    "Dorothy",
+    "Paul",
+    "Victoria",
+    "Mark",
+    "Rebecca",
+    "Kenneth",
+    "Karen",
+    "Stephen",
+    "Margaret",
 ]
 
 
 def capitals_generator():
-    for i in range(0, len(CAPITAL_MAP), 4):
-        print(i)
-        E_0, E_1, E_0p, E_1p = NAMES[i : i + 4]  # entities
-        A_0, A_1, A_0p, A_1p = list(CAPITAL_MAP.keys())[i : i + 4]  # attributes
+    while True:
+        E_0, E_1, E_0p, E_1p = np.random.choice(NAMES, 4, replace=False)
+        A_0, A_1, A_0p, A_1p = np.random.choice(
+            list(CAPITAL_MAP.keys()), 4, replace=False
+        )
         yield CapitalsExample(E_0, E_1, A_0, A_1, E_0p, E_1p, A_0p, A_1p)
 
 
