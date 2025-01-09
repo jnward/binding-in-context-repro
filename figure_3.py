@@ -9,9 +9,13 @@ from tqdm import tqdm
 
 device = "cuda"
 
+import os
+os.environ["HF_TOKEN"] = "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"
+
 # %%
 model = HookedTransformer.from_pretrained_no_processing(
-    "pythia-12B",
+    # "pythia-12B",
+    "meta-llama/Llama-3.2-3B",
     device=device,
     dtype=torch.bfloat16
 )
@@ -25,12 +29,21 @@ for hook in model.hook_dict.keys():
     #     if source_cache[hook].shape[:2] == torch.Size([1, 16]):
     #         hooks_of_interest[hook] = source_cache[hook]
 
-E_0_POS = 18
-E_1_POS = 27
-A_0_POS = 25
-A_1_POS = 34
+# pythia
+# E_0_POS = 18
+# E_1_POS = 27
+# A_0_POS = 25
+# A_1_POS = 34
 
-CONTEXT_LENGTH = 36  #target_context_ids.shape[-1]
+# CONTEXT_LENGTH = 36
+
+# llama 3.2
+E_0_POS = 17
+E_1_POS = 26
+A_0_POS = 24
+A_1_POS = 33
+
+CONTEXT_LENGTH = 35
 
 # %%
 # we run a forward pass on the query sentence, patching in _all_ of the activations
@@ -62,9 +75,23 @@ capitals_examples = [
 ]
 
 # %%
-my_example = capitals_examples[1]
+my_example = capitals_examples[0]
 
-def get_logit_matrices(test_example, model):
+print(my_example.context)
+print(my_example.query_E_0)
+print(my_example.query_E_1)
+print(my_example.context_p)
+print(my_example.query_E_0p)
+print(my_example.query_E_1p)
+
+tokenized = model.tokenizer.encode(my_example.context, return_tensors='pt')
+
+for i, token in enumerate(tokenized.squeeze()):
+    print(i, token, model.tokenizer.decode(token))
+
+# %%
+
+def get_logit_matrices(test_example, model, change_right=False):
     # Move cleanup into the function
     def cleanup_tensors():
         gc.collect()
@@ -105,7 +132,8 @@ def get_logit_matrices(test_example, model):
 
     # Run all interventions
     patch_configs = [
-        [], [A_0_POS], [E_0_POS], [A_0_POS, E_0_POS]
+        [], [A_0_POS], [E_0_POS], [A_0_POS, E_0_POS],
+        [A_1_POS], [E_1_POS], [A_1_POS, E_1_POS]
     ]
     
     all_logits = []
@@ -154,6 +182,10 @@ for example in tqdm(capitals_examples):
 all_avg = torch.stack(all_logits).mean(0)
 all_avg = all_avg.float() - all_avg.max() + 1
 
+left_avg = all_avg[[0, 1, 2, 3]]
+right_avg = all_avg[[0, 4, 5, 6]]
+
+# %%
 import plotly.subplots as sp
 import plotly.graph_objects as go
 
@@ -169,7 +201,7 @@ fig = sp.make_subplots(rows=2, cols=2,
                       y_title="Query name")
 
 # Add each heatmap
-for idx, matrix in enumerate(all_avg):
+for idx, matrix in enumerate(left_avg):
     row = idx // 2 + 1
     col = idx % 2 + 1
     
@@ -178,7 +210,7 @@ for idx, matrix in enumerate(all_avg):
             z=matrix.cpu().numpy()[::-1],
             x=attr_labels,
             y=query_labels,
-            text=[[f'{x:.2f}' for x in row] for row in matrix.cpu().numpy()],
+            text=[[f'{x:.2f}' for x in r] for r in matrix.cpu().numpy()][::-1],
             texttemplate='%{text}',
             textfont={"size": 10},
             colorscale='RdBu_r',
@@ -214,6 +246,79 @@ fig.update_layout(
     width=514,
     showlegend=False,
     title_text="Swapping entity/attribute for (E₀, A₀)"
+)
+
+fig.update_xaxes(scaleanchor="y", scaleratio=1)
+fig.update_yaxes(scaleanchor="x", scaleratio=1)
+
+
+# Make sure labels are shown on all subplots
+fig.update_xaxes(tickangle=0)
+fig.update_yaxes(tickangle=0)
+
+fig.show()
+
+# %%
+import plotly.subplots as sp
+import plotly.graph_objects as go
+
+# Create labels
+query_labels = ['E₀', 'E₁', 'E′₀', 'E′₁'][::-1]
+attr_labels = ['A₀', 'A₁', 'A′₀', 'A′₁']
+titles = ['None', 'Attribute', 'Entity', 'Both']
+
+# Create 2x2 subplot
+fig = sp.make_subplots(rows=2, cols=2, 
+                      subplot_titles=titles,
+                      x_title="Attributes",
+                      y_title="Query name")
+
+# Add each heatmap
+for idx, matrix in enumerate(right_avg):
+    row = idx // 2 + 1
+    col = idx % 2 + 1
+    
+    fig.add_trace(
+        go.Heatmap(
+            z=matrix.cpu().numpy()[::-1],
+            x=attr_labels,
+            y=query_labels,
+            text=[[f'{x:.2f}' for x in r] for r in matrix.cpu().numpy()][::-1],
+            texttemplate='%{text}',
+            textfont={"size": 10},
+            colorscale='RdBu_r',
+            zmid=0
+        ),
+        row=row, col=col
+    )
+    
+    # Add red boxes for cells of interest
+    # For (E₀, A₀)
+    fig.add_shape(
+        type="rect",
+        x0=0.5 + (col-1) * 2, x1=1.5 + (col-1) * 2,  # A₀
+        y0=1.5 - (row-1) * 2, y1=2.5 - (row-1) * 2,  # E₀
+        line=dict(color="red", width=2),
+        row=row, col=col,
+        fillcolor="rgba(0,0,0,0)"  # Transparent fill
+    )
+    
+    # For (E0, A0)
+    fig.add_shape(
+        type="rect",
+        x0=-0.5, x1=0.5,  # A0
+        y0=2.5, y1=3.5,  # E0
+        line=dict(color="red", width=2),
+        row=row, col=col,
+        fillcolor="rgba(0,0,0,0)"  # Transparent fill
+    )
+
+# Update layout
+fig.update_layout(
+    height=600,
+    width=514,
+    showlegend=False,
+    title_text="Swapping entity/attribute for (E1, A1)"
 )
 
 fig.update_xaxes(scaleanchor="y", scaleratio=1)
