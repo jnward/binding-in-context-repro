@@ -10,10 +10,12 @@ from tqdm import tqdm
 device = "cuda"
 
 import os
+
 # %%
 model = HookedTransformer.from_pretrained_no_processing(
     # "pythia-12B",
-    "meta-llama/Llama-3.2-3B",
+    # "meta-llama/Llama-3.2-3B",
+    "gemma-2-27b",
     device=device,
     dtype=torch.bfloat16
 )
@@ -27,21 +29,21 @@ for hook in model.hook_dict.keys():
     #     if source_cache[hook].shape[:2] == torch.Size([1, 16]):
     #         hooks_of_interest[hook] = source_cache[hook]
 
-# pythia
-# E_0_POS = 18
-# E_1_POS = 27
-# A_0_POS = 25
-# A_1_POS = 34
+# pythia and gemma 2
+E_0_POS = 18
+E_1_POS = 27
+A_0_POS = 25
+A_1_POS = 34
 
-# CONTEXT_LENGTH = 36
+CONTEXT_LENGTH = 36
 
 # llama 3.2
-E_0_POS = 17
-E_1_POS = 26
-A_0_POS = 24
-A_1_POS = 33
+# E_0_POS = 17
+# E_1_POS = 26
+# A_0_POS = 24
+# A_1_POS = 33
 
-CONTEXT_LENGTH = 35
+# CONTEXT_LENGTH = 35
 
 # %%
 # we run a forward pass on the query sentence, patching in _all_ of the activations
@@ -178,12 +180,16 @@ for example in tqdm(capitals_examples):
 
 # %%
 all_avg = torch.stack(all_logits).mean(0)
-all_avg = all_avg.float() - all_avg.max() + 1
+all_avg = all_avg.float() - all_avg.max()
 
 left_avg = all_avg[[0, 1, 2, 3]]
 right_avg = all_avg[[0, 4, 5, 6]]
 
+zmin = all_avg.min().item()
+zmax = all_avg.max().item()
+
 # %%
+import plotly
 import plotly.subplots as sp
 import plotly.graph_objects as go
 
@@ -211,8 +217,9 @@ for idx, matrix in enumerate(left_avg):
             text=[[f'{x:.2f}' for x in r] for r in matrix.cpu().numpy()][::-1],
             texttemplate='%{text}',
             textfont={"size": 10},
-            colorscale='RdBu_r',
-            zmid=0
+            colorscale='tempo',
+            zmin=zmin,
+            zmax=zmax,
         ),
         row=row, col=col
     )
@@ -256,6 +263,8 @@ fig.update_yaxes(tickangle=0)
 
 fig.show()
 
+fig.write_image("plots/gemma-2-27b-fig3a.png", scale=4)
+
 # %%
 import plotly.subplots as sp
 import plotly.graph_objects as go
@@ -284,8 +293,9 @@ for idx, matrix in enumerate(right_avg):
             text=[[f'{x:.2f}' for x in r] for r in matrix.cpu().numpy()][::-1],
             texttemplate='%{text}',
             textfont={"size": 10},
-            colorscale='RdBu_r',
-            zmid=0
+            colorscale='tempo',
+            zmin=zmin,
+            zmax=zmax,
         ),
         row=row, col=col
     )
@@ -328,5 +338,8 @@ fig.update_xaxes(tickangle=0)
 fig.update_yaxes(tickangle=0)
 
 fig.show()
+
+fig.write_image("plots/gemma-2-27b-fig3b.png", scale=4)
+
 
 # %%
