@@ -10,8 +10,6 @@ from tqdm import tqdm
 device = "cuda"
 
 import os
-os.environ["HF_TOKEN"] = "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"
-
 # %%
 model = HookedTransformer.from_pretrained_no_processing(
     # "pythia-12B",
