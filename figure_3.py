@@ -7,17 +7,17 @@ from tasks.capitals import CAPITAL_MAP, NAMES, capitals_generator
 from functools import partial
 from tqdm import tqdm
 
-device = "cuda"
+device = "mps"
 
 import os
 
 # %%
 model = HookedTransformer.from_pretrained_no_processing(
-    # "pythia-12B",
+    "pythia-1B",
     # "meta-llama/Llama-3.2-3B",
-    "gemma-2-27b",
+    # "gemma-2-27b",
     device=device,
-    dtype=torch.bfloat16
+    # dtype=torch.bfloat16
 )
 
 # %%
@@ -132,8 +132,8 @@ def get_logit_matrices(test_example, model, change_right=False):
 
     # Run all interventions
     patch_configs = [
-        [], [A_0_POS], [E_0_POS], [A_0_POS, E_0_POS],
-        [A_1_POS], [E_1_POS], [A_1_POS, E_1_POS]
+        [], [A_0_POS], [E_0_POS, E_0_POS + 1], [A_0_POS, E_0_POS, E_0_POS + 1],
+        [A_1_POS], [E_1_POS, E_1_POS + 1], [A_1_POS, E_1_POS, E_1_POS + 1]
     ]
     
     all_logits = []
@@ -185,7 +185,7 @@ all_avg = all_avg.float() - all_avg.max()
 left_avg = all_avg[[0, 1, 2, 3]]
 right_avg = all_avg[[0, 4, 5, 6]]
 
-zmin = all_avg.min().item()
+zmin = all_avg.min().item() / 2
 zmax = all_avg.max().item()
 
 # %%
@@ -342,4 +342,121 @@ fig.show()
 fig.write_image("plots/gemma-2-27b-fig3b.png", scale=4)
 
 
+# %%
+import plotly.subplots as sp
+import plotly.graph_objects as go
+
+# Create labels
+query_labels = ['E₀', 'E₁', 'E′₀', 'E′₁'][::-1]
+attr_labels = ['A₀', 'A₁', 'A′₀', 'A′₁']
+titles = ['None', 'A0', 'None', 'A1', 'E0', 'A0 and E0', 'E1', 'A1 and E1']
+colorscale = "blues_r"
+
+# Create 2x4 subplot
+fig = sp.make_subplots(
+    rows=2, cols=4,
+    subplot_titles=titles,
+    horizontal_spacing=0.05,
+    vertical_spacing=0.15,
+    x_title="Attributes",
+    y_title="Query name"
+)
+
+# Add heatmaps for left plot (first 4 subplots)
+for idx, matrix in enumerate(left_avg):
+    row = idx // 2 + 1
+    col = idx % 2 + 1
+    
+    fig.add_trace(
+        go.Heatmap(
+            z=matrix.cpu().numpy()[::-1],
+            x=attr_labels,
+            y=query_labels,
+            text=[[f'{x:.2f}' for x in r] for r in matrix.cpu().numpy()][::-1],
+            texttemplate='%{text}',
+            textfont={"size": 10},
+            colorscale=colorscale,
+            zmin=zmin,
+            zmax=zmax,
+        ),
+        row=row, col=col
+    )
+    
+    # Add red boxes for (E₀, A₀)
+    fig.add_shape(
+        type="rect",
+        x0=-0.5 + (col-1) * 2, x1=0.5 + (col-1) * 2,
+        y0=2.5 - (row-1) * 2, y1=3.5 - (row-1) * 2,
+        line=dict(color="red", width=2),
+        row=row, col=col,
+        fillcolor="rgba(0,0,0,0)"
+    )
+    
+    # Add red boxes for (E1, A1)
+    fig.add_shape(
+        type="rect",
+        x0=0.5, x1=1.5,
+        y0=1.5, y1=2.5,
+        line=dict(color="red", width=2),
+        row=row, col=col,
+        fillcolor="rgba(0,0,0,0)"
+    )
+
+# Add heatmaps for right plot (last 4 subplots)
+for idx, matrix in enumerate(right_avg):
+    row = idx // 2 + 1
+    col = (idx % 2 + 1) + 2  # Offset by 2 columns
+    
+    fig.add_trace(
+        go.Heatmap(
+            z=matrix.cpu().numpy()[::-1],
+            x=attr_labels,
+            y=query_labels,
+            text=[[f'{x:.2f}' for x in r] for r in matrix.cpu().numpy()][::-1],
+            texttemplate='%{text}',
+            textfont={"size": 10},
+            colorscale=colorscale,
+            zmin=zmin,
+            zmax=zmax,
+        ),
+        row=row, col=col
+    )
+    
+    # Add red boxes for (E₀, A₀)
+    fig.add_shape(
+        type="rect",
+        x0=0.5 + (col-3) * 2, x1=1.5 + (col-3) * 2,
+        y0=1.5 - (row-1) * 2, y1=2.5 - (row-1) * 2,
+        line=dict(color="red", width=2),
+        row=row, col=col,
+        fillcolor="rgba(0,0,0,0)"
+    )
+    
+    # Add red boxes for (E0, A0)
+    fig.add_shape(
+        type="rect",
+        x0=-0.5, x1=0.5,
+        y0=2.5, y1=3.5,
+        line=dict(color="red", width=2),
+        row=row, col=col,
+        fillcolor="rgba(0,0,0,0)"
+    )
+
+# Update layout
+fig.update_layout(
+    height=600,
+    width=1028,  # Doubled from original
+    showlegend=False,
+    title_text="Entity/Attribute Activation Patching"
+)
+
+# Update axes properties
+for i in range(1, 5):
+    fig.update_xaxes(scaleanchor=f"y{i}", scaleratio=1, col=i)
+    fig.update_yaxes(scaleanchor=f"x{i}", scaleratio=1, row=i)
+    fig.update_xaxes(tickangle=0, col=i)
+    fig.update_yaxes(tickangle=0, row=i)
+
+fig.show()
+fig.write_image("plots/pythia-1.4B-float32-fig3.png", scale=4)
 # %%
