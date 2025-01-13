@@ -136,8 +136,8 @@ r_E_next = torch.randn(len(E_next_diff_norms), mean_E_diff.shape[-1], device=dev
 r_A = torch.randn(len(A_diff_norms), mean_E_diff.shape[-1], device=device, dtype=E_diff_norms.dtype)
 
 r_E /= torch.norm(r_E, dim=1, keepdim=True)
-r_E_next = torch.norm(r_E_next, dim=1, keepdim=True)
-r_A = torch.norm(r_A, dim=1, keepdim=True)
+r_E_next /= torch.norm(r_E_next, dim=1, keepdim=True)
+r_A /= torch.norm(r_A, dim=1, keepdim=True)
 
 r_E *= E_diff_norms.unsqueeze(1)
 r_E_next *= E_next_diff_norms.unsqueeze(1)
