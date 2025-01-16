@@ -28,24 +28,6 @@ for hook in model.hook_dict.keys():
     if "hook_resid_pre" in hook:
         hooks_of_interest.append(hook)
 
-
-
-# %%
-test_context = """\
-Repeat the following lists of numbers.
- 2 6 4 8 1 => 2 6 4 8 1
- 9 3 0 5 7 => 9 3 0 5 7
- 6 3 9 1 4"""
-
-# %%
-
-tokenized = model.tokenizer.encode(test_context, return_tensors='pt').to(device)
-
-for i, token in enumerate(tokenized.squeeze()):
-    print(i, token, repr(model.tokenizer.decode(token)))
-
-CONTEXT_LENGTH = 39
-
 # %%
 def move_elements(tensor, i, j, dim=1):
     if i == j:
@@ -88,57 +70,6 @@ def permute_acts(target_ids: torch.Tensor, target_cache: ActivationCache, i: int
 
     return corrupt_logits
 
-
-# %%
-_, target_cache = model.run_with_cache(
-    tokenized
-)
-
-# %%
-query = " =>"
-query_ids = model.tokenizer.encode(query, return_tensors='pt', add_special_tokens=False).to(device)
-full_ids = torch.cat([tokenized, query_ids], dim=1)
-
-i = 38
-j = 34
-print(model.tokenizer.decode(move_elements(tokenized, i, j).squeeze()[-5:]))
-
-for _ in range(5):
-    corrupt_logits = permute_acts(full_ids, target_cache, i, j)[0, -1, :]
-    generated_token = corrupt_logits.argmax(keepdim=True)
-    print(model.tokenizer.decode(generated_token.squeeze()), end=', ')
-    print(corrupt_logits[generated_token.item()].item())
-    full_ids = torch.cat([full_ids, generated_token[None, :]], dim=1)
-
-print()
-
-test_tokens = torch.cat([tokenized, query_ids], dim=1)
-
-for _ in range(5):
-    # logits = model(move_elements(test_tokens, i, j))[0, -1, :]
-    logits = model(test_tokens)[0, -1, :]
-    generated_token = logits.argmax(keepdim=True)
-    print(model.tokenizer.decode(generated_token.squeeze()), end=', ')
-    print(logits[generated_token.item()].item())
-    test_tokens = torch.cat([test_tokens, generated_token[None, :]], dim=1)
-
-
-
-
-
-# %%
-full_ids = torch.cat([tokenized, query_ids], dim=1)
-moved_tokenized = move_elements(full_ids, 36, 34)
-
-for _ in range(5):
-    logits = model(moved_tokenized)[0, -1, :]
-    generated_token = logits.argmax(keepdim=True)
-    print(model.tokenizer.decode(generated_token.squeeze()))
-    moved_tokenized = torch.cat([moved_tokenized, generated_token[None, :]], dim=1)
-
-
-
-
 # %%
 # pythia and gemma 2
 E_0_POS = 18
@@ -146,7 +77,7 @@ E_1_POS = 27
 A_0_POS = 25
 A_1_POS = 34
 
-CONTEXT_LENGTH = 36
+CONTEXT_LENGTH = 36 + 9  # for n = 3
 
 # llama 3.2
 # E_0_POS = 17
@@ -157,7 +88,7 @@ CONTEXT_LENGTH = 36
 # CONTEXT_LENGTH = 35
 
 # %%
-my_capitals_generator = capitals_generator()
+my_capitals_generator = capitals_generator(n=3)
 capitals_examples = [
     next(my_capitals_generator) for _ in range(500)
 ]
@@ -179,7 +110,7 @@ def cleanup_tensors():
     elif device == "mps":
         torch.mps.empty_cache()
 
-for example in capitals_examples[:10]:
+for example in tqdm(capitals_examples[:10]):
     context_ids = model.tokenizer.encode(example.context, return_tensors='pt').to(device)
     _, target_cache = model.run_with_cache(context_ids)
 
@@ -198,9 +129,8 @@ for example in capitals_examples[:10]:
     
     full_query_ids = torch.cat([context_ids.expand(2, -1), query_token_ids], dim=1)
 
-    for i in range(36):
-        print(i)
-        corrupt_logits = permute_acts(full_query_ids, target_cache, E_0_POS, i)[:, -1, :]
+    for i in range(CONTEXT_LENGTH):
+        corrupt_logits = permute_acts(full_query_ids, target_cache, A_0_POS, i)[:, -1, :]
         answer_logits = corrupt_logits[:, answer_token_ids].detach().cpu()
         out[i].append(answer_logits)
 
@@ -261,8 +191,8 @@ fig = px.line(
 )
 
 # Add vertical lines
-fig.add_vline(x=E_0_POS, line_dash="dash", line_color="gray", annotation_text="control condition", annotation_position="top")
-fig.add_vline(x=E_1_POS, line_dash="dash", line_color="green", annotation_text="swap condition", annotation_position="top")
+fig.add_vline(x=A_0_POS, line_dash="dash", line_color="gray", annotation_text="control condition", annotation_position="top")
+fig.add_vline(x=A_1_POS, line_dash="dash", line_color="green", annotation_text="swap condition", annotation_position="top")
 
 # Update layout for better readability
 fig.update_layout(

@@ -1,6 +1,6 @@
 # %%
-%load_ext autoreload
-%autoreload 2
+# %load_ext autoreload
+# %autoreload 2
 import torch
 from transformer_lens import HookedTransformer, ActivationCache
 from tasks.capitals import CAPITAL_MAP, NAMES, capitals_generator
@@ -10,12 +10,13 @@ from tqdm import tqdm
 device = "cuda"
 
 import os
+os.environ["HF_TOKEN"] = "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"
 
 # %%
 model = HookedTransformer.from_pretrained_no_processing(
-    # "pythia-6.9B",
+    "pythia-12B",
     # "meta-llama/Llama-3.2-3B",
-    "gemma-2-27b",
+    # "gemma-2-27b",
     device=device,
     dtype=torch.bfloat16
 )
@@ -26,13 +27,17 @@ for hook in model.hook_dict.keys():
     if "hook_resid_pre" in hook:
         hooks_of_interest.append(hook)
 
+N = 13
+
 # pythia and gemma 2
 E_0_POS = 18
 E_1_POS = 27
 A_0_POS = 25
 A_1_POS = 34
 
-CONTEXT_LENGTH = 36
+N_LENGTH = 9
+
+CONTEXT_LENGTH = 18 + N_LENGTH * N
 
 # llama 3.2
 # E_0_POS = 17
@@ -45,7 +50,7 @@ CONTEXT_LENGTH = 36
 # %%
 
 
-my_capitals_generator = capitals_generator()
+my_capitals_generator = capitals_generator(n=N)
 capitals_examples = [
     next(my_capitals_generator) for _ in range(500)
 ]
@@ -71,41 +76,38 @@ print(repr(model.tokenizer.decode(my_tokens[E_0_POS: E_0_POS + 2])))
 print(repr(model.tokenizer.decode(my_tokens[E_1_POS: E_1_POS + 2])))
 
 # %%
-def get_activation_difference(context: str):
+def get_activation_difference(context: str) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
     tokenized = model.tokenizer.encode(context, return_tensors='pt')
     tokenized = tokenized.to(device)
     with torch.no_grad():
         _, cache = model.run_with_cache(tokenized)
-    E_0_acts = []
-    E_0_next_acts = []
-    E_1_acts = []
-    E_1_next_acts = []
-    A_0_acts = []
-    A_1_acts = []
+    E_acts = [[] for _ in range(N)]
+    E_next_acts = [[] for _ in range(N)]
+    A_acts = [[] for _ in range(N)]
 
     for hook in hooks_of_interest:
         acts = cache[hook].squeeze()
-        E_0_acts.append(acts[E_0_POS])
-        E_0_next_acts.append(acts[E_0_POS + 1])
-        E_1_acts.append(acts[E_1_POS])
-        E_1_next_acts.append(acts[E_1_POS + 1])
-        A_0_acts.append(acts[A_0_POS])
-        A_1_acts.append(acts[A_1_POS])
+        for i in range(N):
+            E_acts[i].append(acts[E_0_POS + i * N_LENGTH])
+            E_next_acts[i].append(acts[E_0_POS + 1 + i * N_LENGTH])
+            A_acts[i].append(acts[A_0_POS + i * N_LENGTH])
 
-    E_0_acts = torch.stack(E_0_acts)
-    E_0_next_acts = torch.stack(E_0_next_acts)
-    E_1_acts = torch.stack(E_1_acts)
-    E_1_next_acts = torch.stack(E_1_next_acts)
-    A_0_acts = torch.stack(A_0_acts)
-    A_1_acts = torch.stack(A_1_acts)
+    E_acts = [torch.stack(acts) for acts in E_acts]
+    E_next_acts = [torch.stack(acts) for acts in E_next_acts]
+    A_acts = [torch.stack(acts) for acts in A_acts]
 
-    E_diff = E_1_acts - E_0_acts
-    E_next_diff = E_1_next_acts - E_0_next_acts
-    A_diff = A_1_acts - A_0_acts
+    E_diffs = [E_acts[i] - E_acts[0] for i in range(1, N)]
+    E_next_diffs = [E_next_acts[i] - E_next_acts[0] for i in range(1, N)]
+    A_diffs = [A_acts[i] - A_acts[0] for i in range(1, N)]
 
-    # C_A_0 + A_diff => A_0 bound to E_1
-    # C_A_1 - A_diff => A_1 bound to E_0
-    return E_diff, E_next_diff, A_diff
+    for i in range(E_0_POS, CONTEXT_LENGTH, N_LENGTH):
+        e_token = tokenized[0, i]
+        e = model.tokenizer.decode(e_token)
+        print(e)
+
+    # C_A_0 + A_diffs[0] => A_0 bound to E_1
+    # C_A_1 - A_diffs[0] => A_1 bound to E_0
+    return E_diffs, E_next_diffs, A_diffs
 
 # %%
 E_diffs = []
@@ -120,10 +122,199 @@ for example in tqdm(capitals_examples):
 
 # %%
 
-mean_E_diff = torch.stack(E_diffs).mean(dim=0)
-mean_E_next_diff = torch.stack(E_next_diffs).mean(dim=0)
-mean_A_diff = torch.stack(A_diffs).mean(dim=0)
+E_deltas = torch.stack([torch.stack(E_diff) for E_diff in E_diffs]).mean(0)
+E_next_deltas = torch.stack([torch.stack(E_next_diff) for E_next_diff in E_next_diffs]).mean(0)
+A_deltas = torch.stack([torch.stack(A_diff) for A_diff in A_diffs]).mean(0)
 
+
+# %%
+delta_stack = torch.cat([E_deltas, E_next_deltas, A_deltas])
+delta_stack.shape
+
+# %%
+my_data = A_deltas
+my_data = my_data.reshape(my_data.shape[0], -1)
+my_data = my_data / my_data.norm(2, 1, keepdim=True)
+
+
+# %%
+U, S, V = my_data.reshape(my_data.shape[0], -1).float().svd()
+
+# %%
+U.shape
+
+# %%
+px.line(V.float().cpu()[:, :2])
+
+# %%
+fig = px.line(
+    V.float().cpu()[:, 0].reshape(A_deltas[0].shape).abs().max(1)[0],
+    title="Max magnitude of PC0 weights for each layer",
+    labels={'value': 'Max Magnitude', 'index': 'Layer'}
+)
+# fig.s
+fig.show()
+
+
+
+# %%
+def compute_variance_explained(S):
+    # Square the singular values to get the eigenvalues
+    variances = S ** 2
+    
+    # Total variance is sum of squared singular values
+    total_variance = variances.sum()
+    
+    # Compute percentage of variance explained by each component
+    variance_explained = variances / total_variance * 100
+    
+    # Compute cumulative variance explained
+    cumulative_variance = torch.cumsum(variance_explained, dim=0)
+    
+    return variance_explained, cumulative_variance
+
+variance_explained, cumulative_variance = compute_variance_explained(S)
+
+print("Variance explained by each component:")
+for i, (var, cum_var) in enumerate(zip(variance_explained, cumulative_variance)):
+    print(f"PC {i+1}: {var:.2f}% (Cumulative: {cum_var:.2f}%)")
+
+# %%
+import torch
+import plotly.express as px
+import pandas as pd
+
+def project_and_plot(data_tensor, V):
+    # Reshape data tensor from (12, 36, 5120) to (12, 36*5120)
+    B = data_tensor.shape[0]
+    flattened = data_tensor.reshape(B, -1)
+    
+    # Center the data
+    mean = flattened.mean(dim=0, keepdim=True)
+    centered = flattened - mean
+    
+    # Project onto first 2 PCs
+    # V should be your right singular vectors from SVD
+    projections = centered @ V[:, :2]  # Shape: (12, 2)
+    
+    # Convert to numpy for plotting
+    proj_np = projections.cpu().numpy()
+    
+    # Create category and label arrays
+    if V.shape[1] == 36:
+        categories = ['E deltas'] * 12 + ['E+1 deltas'] * 12 + ['A deltas'] * 12
+        labels = [str(i % 12 + 1) for i in range(36)]
+    else:
+        categories = ['Deltas'] * 12
+        labels = [str(i) for i in range(12)]
+    
+    # Create DataFrame for plotting
+    df = pd.DataFrame({
+        'PC1': proj_np[:, 0],
+        'PC2': proj_np[:, 1],
+        'Category': categories,
+        'Label': labels
+    })
+    
+    # Create scatter plot with color groups
+    fig = px.scatter(df, x='PC1', y='PC2', 
+                    color='Category',
+                    text='Label',
+                    title='Data Projected onto First Two Principal Components',
+                    color_discrete_sequence=['#1f77b4', '#ff7f0e', '#2ca02c'])  # Nice color scheme
+    
+    # Update trace settings
+    fig.update_traces(textposition='top center', marker=dict(size=10))
+    
+    # Update layout
+    fig.update_layout(
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="right",
+            x=0.99
+        )
+    )
+    fig.show()
+
+# Usage:
+project_and_plot(my_data.float(), V.float())
+
+# %%
+import torch
+import plotly.express as px
+import pandas as pd
+
+def project_and_plot_3d(data_tensor, V):
+    # Reshape data tensor to (36, 36*5120)
+    B = data_tensor.shape[0]
+    flattened = data_tensor.reshape(B, -1)
+    
+    # Center the data
+    mean = flattened.mean(dim=0, keepdim=True)
+    centered = flattened - mean
+    
+    # Project onto first 3 PCs
+    projections = centered @ V[:, :3]  # Shape: (36, 3)
+    
+    # Convert to numpy for plotting
+    proj_np = projections.cpu().numpy()
+    
+    # Create category and label arrays
+    if V.shape[1] == 36:
+        categories = ['E deltas'] * 12 + ['E+1 deltas'] * 12 + ['A deltas'] * 12
+        labels = [str(i % 12 + 1) for i in range(36)]
+    else:
+        categories = ['Deltas'] * 12
+        labels = [str(i) for i in range(12)]
+    
+    # Create DataFrame for plotting
+    df = pd.DataFrame({
+        'PC1': proj_np[:, 0],
+        'PC2': proj_np[:, 1],
+        'PC3': proj_np[:, 2],
+        'Category': categories,
+        'Label': labels
+    })
+    
+    # Create 3D scatter plot with color groups
+    fig = px.scatter_3d(df, x='PC1', y='PC2', z='PC3',
+                       color='Category',
+                       text='Label',
+                       title='Data Projected onto First Three Principal Components',
+                       color_discrete_sequence=['#1f77b4', '#ff7f0e', '#2ca02c'])
+    
+    # Update trace settings
+    fig.update_traces(
+        marker=dict(size=8),
+        textposition='top center'
+    )
+    
+    # Update layout
+    fig.update_layout(
+        scene=dict(
+            aspectmode='cube',  # Make the plot cubic
+            xaxis_title="PC1",
+            yaxis_title="PC2",
+            zaxis_title="PC3"
+        ),
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="right",
+            x=0.99
+        )
+    )
+    
+    fig.show()
+
+# Usage:
+project_and_plot_3d(my_data.float(), V.float())
+#%%
+
+mean_E_diff = E_deltas[0]
+mean_E_next_diff = E_next_deltas[0]
+mean_A_diff = A_deltas[0]
 
 # %%
 E_diff_norms = torch.norm(mean_E_diff, dim=-1)
@@ -131,17 +322,17 @@ E_next_diff_norms = torch.norm(mean_E_next_diff, dim=-1)
 A_diff_norms = torch.norm(mean_A_diff, dim=-1)
 
 # %%
-r_E = torch.randn(len(E_diff_norms), mean_E_diff.shape[-1], device=device, dtype=E_diff_norms.dtype)
-r_E_next = torch.randn(len(E_next_diff_norms), mean_E_diff.shape[-1], device=device, dtype=E_diff_norms.dtype)
-r_A = torch.randn(len(A_diff_norms), mean_E_diff.shape[-1], device=device, dtype=E_diff_norms.dtype)
+# r_E = torch.randn(len(E_diff_norms), mean_E_diff.shape[-1], device=device, dtype=E_diff_norms.dtype)
+# r_E_next = torch.randn(len(E_next_diff_norms), mean_E_diff.shape[-1], device=device, dtype=E_diff_norms.dtype)
+# r_A = torch.randn(len(A_diff_norms), mean_E_diff.shape[-1], device=device, dtype=E_diff_norms.dtype)
 
-r_E /= torch.norm(r_E, dim=1, keepdim=True)
-r_E_next /= torch.norm(r_E_next, dim=1, keepdim=True)
-r_A /= torch.norm(r_A, dim=1, keepdim=True)
+# r_E /= torch.norm(r_E, dim=1, keepdim=True)
+# r_E_next /= torch.norm(r_E_next, dim=1, keepdim=True)
+# r_A /= torch.norm(r_A, dim=1, keepdim=True)
 
-r_E *= E_diff_norms.unsqueeze(1)
-r_E_next *= E_next_diff_norms.unsqueeze(1)
-r_A *= A_diff_norms.unsqueeze(1)
+# r_E *= E_diff_norms.unsqueeze(1)
+# r_E_next *= E_next_diff_norms.unsqueeze(1)
+# r_A *= A_diff_norms.unsqueeze(1)
 
 # mean_E_diff = r_E
 # mean_E_next_diff = r_E_next
@@ -177,6 +368,9 @@ def patch_all_acts_at_positions(target_ids: torch.Tensor, target_cache: Activati
     )
 
     return corrupt_logits
+
+# %%
+len(A_deltas)
 
 
 # %%
@@ -231,6 +425,8 @@ for example in tqdm(capitals_examples[:n_examples]):
     attribute_1 += 1 * corrupt_A_logits_1.argmax().item() == 1
     both_0 += 1 * corrupt_both_logits_0.argmax().item() == 0
     both_1 += 1 * corrupt_both_logits_1.argmax().item() == 1
+
+# %%
 
 print(f"Control:\t{control_0 / n_examples:.2f}, {control_1 / n_examples:.2f}")
 print(f"Entity:\t{entity_0 / n_examples:.2f}, {entity_1 / n_examples:.2f}")
