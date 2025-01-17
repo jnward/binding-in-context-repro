@@ -86,8 +86,8 @@ NAMES = [
 
 
 def capitals_generator(n=2):
-    assert n * 2 < len(NAMES)
-    assert n * 2 < len(CAPITAL_MAP)
+    assert n * 2 <= len(NAMES)
+    assert n * 2 <= len(CAPITAL_MAP)
     while True:
         entities = np.random.choice(NAMES, n * 2, replace=False)
         attributes = np.random.choice(list(CAPITAL_MAP.keys()), n * 2, replace=False)
