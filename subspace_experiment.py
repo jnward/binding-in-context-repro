@@ -135,6 +135,8 @@ delta_stack.shape
 # %%
 my_data = A_deltas
 my_data = my_data.reshape(my_data.shape[0], -1)
+
+# maybe it's important to norm, idk
 my_data = my_data / my_data.norm(2, 1, keepdim=True)
 
 
@@ -232,6 +234,20 @@ project_and_plot(my_data.float(), V.float())
 
 # %%
 my_data = delta_stack
+
+my_data = my_data.reshape(my_data.shape[0], -1)
+my_data = my_data / my_data.norm(2, 1, keepdim=True)
+
+# %%
+U, S, V = my_data.reshape(my_data.shape[0], -1).float().svd()
+
+variance_explained, cumulative_variance = compute_variance_explained(S)
+
+print("Variance explained by each component:")
+for i, (var, cum_var) in enumerate(zip(variance_explained, cumulative_variance)):
+    print(f"PC {i+1}: {var:.2f}% (Cumulative: {cum_var:.2f}%)")
+
+
 
 def project_and_plot_3d(data_tensor, V):
     B = data_tensor.shape[0]
