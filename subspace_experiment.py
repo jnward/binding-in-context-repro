@@ -11,13 +11,14 @@ device = "mps"
 torch.set_grad_enabled(False)
 
 import os
+os.environ["HF_TOKEN"] = "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"
 
 # %%
 # Load the model
-model = HookedTransformer.from_pretrained_no_processing(
+model = HookedTransformer.from_pretrained(
     "pythia-1B",
-    # "meta-llama/Llama-3.2-3B",
-    # "gemma-2-27b",
+    # "meta-llama/Llama-3.2-1B",
+    # "gemma-2-2b",
     device=device,
     dtype=torch.bfloat16,
 )
@@ -28,6 +29,9 @@ hooks_of_interest = []
 for hook in model.hook_dict.keys():
     if "hook_resid_pre" in hook:
         hooks_of_interest.append(hook)
+
+LAYERS = [10]
+hooks_of_interest = hooks_of_interest[LAYERS[0]:LAYERS[-1] + 1]
 
 # N is the number of binding examples in each context
 N = 13
@@ -43,19 +47,25 @@ CONTEXT_LENGTH = 18 + N_LENGTH * N
 
 # llama 3.2
 # E_0_POS = 17
-# E_1_POS = 26
 # A_0_POS = 24
-# A_1_POS = 33
 
-# CONTEXT_LENGTH = 35
+# N_LENGTH = 9
+
+# CONTEXT_LENGTH = 17 + N_LENGTH * N
 
 # %%
 my_capitals_generator = capitals_generator(n=N)
-capitals_examples = [next(my_capitals_generator) for _ in range(500)]
+capitals_examples = [next(my_capitals_generator) for _ in range(1000)]
 
 print(capitals_examples[0].context)
 print(capitals_examples[0].query_E_0)
 print(capitals_examples[0].answers)
+
+tokenized = model.tokenizer.encode(capitals_examples[0].context, return_tensors="pt")
+
+for i, token in enumerate(tokenized[0]):
+    print(i, model.tokenizer.decode(token))
+
 
 
 # %%
@@ -88,22 +98,32 @@ def get_activation_difference(
 
     for hook in hooks_of_interest:
         acts = cache[hook].squeeze()
+
+        # normalize activations
+        acts /= acts.norm(2, -1, keepdim=True)
         for i in range(N):
-            E_acts[i].append(acts[E_0_POS + i * N_LENGTH])
-            E_next_acts[i].append(acts[E_0_POS + 1 + i * N_LENGTH])
-            A_acts[i].append(acts[A_0_POS + i * N_LENGTH])
+            E_idx = E_0_POS + i * N_LENGTH
+            E_next_idx = E_0_POS + 1 + i * N_LENGTH
+            A_idx = A_0_POS + i * N_LENGTH
+            # E_idx = torch.randint(0, CONTEXT_LENGTH, (1,))
+            # E_next_idx = torch.randint(0, CONTEXT_LENGTH, (1,))
+            # A_idx = torch.randint(0, CONTEXT_LENGTH, (1,))
 
-    E_acts = [torch.stack(acts) for acts in E_acts]
-    E_next_acts = [torch.stack(acts) for acts in E_next_acts]
-    A_acts = [torch.stack(acts) for acts in A_acts]
+            E_acts[i].append(acts[E_idx])
+            E_next_acts[i].append(acts[E_next_idx])
+            A_acts[i].append(acts[A_idx])
 
-    E_diffs = [E_acts[i] - E_acts[0] for i in range(1, N)]
-    E_next_diffs = [E_next_acts[i] - E_next_acts[0] for i in range(1, N)]
-    A_diffs = [A_acts[i] - A_acts[0] for i in range(1, N)]
+    E_acts = torch.stack([torch.stack(acts) for acts in E_acts])
+    E_next_acts = torch.stack([torch.stack(acts) for acts in E_next_acts])
+    A_acts = torch.stack([torch.stack(acts) for acts in A_acts])
+
+    E_diff = [E_acts[i] - E_acts[0] for i in range(1, N)]
+    E_next_diff = [E_next_acts[i] - E_next_acts[0] for i in range(1, N)]
+    A_diff = [A_acts[i] - A_acts[0] for i in range(1, N)]
 
     # C_A_0 + A_diffs[0] => A_0 bound to E_1
     # C_A_1 - A_diffs[0] => A_1 bound to E_0
-    return E_diffs, E_next_diffs, A_diffs
+    return E_diff, E_next_diff, A_diff
 
 
 # %%
@@ -113,7 +133,9 @@ A_diffs = []
 
 # Iterate thru all our examples so we can get mean differences
 for example in tqdm(capitals_examples):
-    E_diff, E_next_diff, A_diff = get_activation_difference(example.context)
+    ctx = example.context
+    E_diff, E_next_diff, A_diff = get_activation_difference(ctx)
+    # E_diff, E_next_diff, A_diff = get_activation_difference(example.context)
     E_diffs.append(E_diff)
     E_next_diffs.append(E_next_diff)
     A_diffs.append(A_diff)
@@ -133,12 +155,8 @@ delta_stack = torch.cat([E_deltas, E_next_deltas, A_deltas])
 delta_stack.shape
 
 # %%
-my_data = A_deltas
+my_data = delta_stack
 my_data = my_data.reshape(my_data.shape[0], -1)
-
-# maybe it's important to norm, idk
-my_data = my_data / my_data.norm(2, 1, keepdim=True)
-
 
 # %%
 U, S, V = my_data.reshape(my_data.shape[0], -1).float().svd()
@@ -146,20 +164,6 @@ U, S, V = my_data.reshape(my_data.shape[0], -1).float().svd()
 # %%
 import plotly.express as px
 
-# plot "weights" of each element of the first two singular vectors
-px.line(V.float().cpu()[:, :2])
-
-# %%
-fig = px.line(
-    V.float().cpu()[:, 0].reshape(A_deltas[0].shape).abs().max(1)[0],
-    title="Max magnitude of PC0 weights for each layer",
-    labels={"value": "Max Magnitude", "index": "Layer"},
-)
-# fig.s
-fig.show()
-
-
-# %%
 # claude wrote all the rest of this
 def compute_variance_explained(S):
     # Square the singular values to get the eigenvalues
@@ -176,12 +180,115 @@ def compute_variance_explained(S):
 
     return variance_explained, cumulative_variance
 
-
 variance_explained, cumulative_variance = compute_variance_explained(S)
 
 print("Variance explained by each component:")
 for i, (var, cum_var) in enumerate(zip(variance_explained, cumulative_variance)):
     print(f"PC {i+1}: {var:.2f}% (Cumulative: {cum_var:.2f}%)")
+
+# %%
+import torch
+import plotly.express as px
+import plotly.subplots as sp
+import plotly.graph_objects as go
+import pandas as pd
+import numpy as np
+
+def plot_all_pcs(data_tensor, V, num_pcs=None):
+    """
+    Plot individual 1D line plots for each principal component.
+    
+    Args:
+        data_tensor: The input tensor of shape [B, *]
+        V: The right singular vectors from SVD
+        num_pcs: Number of PCs to plot. If None, plots all PCs.
+    """
+    B = data_tensor.shape[0]
+    flattened = data_tensor.reshape(B, -1)
+    
+    # Center the data
+    mean = flattened.mean(dim=0, keepdim=True)
+    centered = flattened - mean
+    
+    # Project onto all PCs
+    projections = centered @ V
+    proj_np = projections.cpu().numpy()
+    
+    if num_pcs is None:
+        num_pcs = proj_np.shape[1]
+    
+    # Create subplot grid
+    rows = (num_pcs + 2) // 3  # 3 plots per row, rounded up
+    cols = min(3, num_pcs)
+    
+    fig = sp.make_subplots(
+        rows=rows, 
+        cols=cols,
+        subplot_titles=[f'PC {i+1} - {cumulative_variance[i].cpu().item():.2f}% total variance explained' for i in range(num_pcs)]
+    )
+    
+    # Define categories and labels like in your original code
+    if V.shape[1] == 36:
+        categories = ["E deltas"] * 12 + ["E+1 deltas"] * 12 + ["A deltas"] * 12
+        labels = [str(i % 12 + 1) for i in range(36)]
+    else:
+        categories = ["Deltas"] * 12
+        labels = [str(i + 1) for i in range(12)]
+    
+    # Add traces for each PC
+    for i in range(num_pcs):
+        row = i // 3 + 1
+        col = i % 3 + 1
+        
+        # Create DataFrame for this PC
+        df = pd.DataFrame({
+            'Index': range(len(proj_np[:, i])),
+            'Projection': proj_np[:, i],
+            'Category': categories,
+            'Label': labels
+        })
+        
+        # Add scatter plot for this PC
+        for category in set(categories):
+            category_data = df[df['Category'] == category]
+            fig.add_trace(
+                go.Scatter(
+                    x=category_data['Index'],
+                    y=category_data['Projection'],
+                    mode='lines+markers+text',
+                    name=category,
+                    text=category_data['Label'],
+                    textposition="top center",
+                    showlegend=(i == 0),  # Only show legend for first subplot
+                ),
+                row=row,
+                col=col
+            )
+    
+    # Update layout
+    fig.update_layout(
+        height=300 * rows,  # Adjust height based on number of rows
+        width=1200,         # Fixed width
+        title_text="Projections onto Principal Components",
+        showlegend=True,
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="right",
+            x=0.99
+        )
+    )
+    
+    # Update all subplot axes
+    fig.update_xaxes(title_text="Index")
+    fig.update_yaxes(title_text="Projection")
+    
+    return fig
+
+# Example usage:
+# fig = plot_all_pcs(my_data.float(), V.float(), num_pcs=10)
+# fig.show()
+
 
 # %%
 import torch
@@ -208,6 +315,7 @@ def project_and_plot(data_tensor, V):
 
     df = pd.DataFrame(
         {
+            "Index": range(B),
             "PC1": proj_np[:, 0],
             "PC2": proj_np[:, 1],
             "Category": categories,
@@ -219,36 +327,57 @@ def project_and_plot(data_tensor, V):
         df,
         x="PC1",
         y="PC2",
-        color="Category",
-        text="Label",
+        color="Index",
+        custom_data=["Index"],  # Include Index in hover data
         title="Data Projected onto First Two Principal Components",
-        color_discrete_sequence=["#1f77b4", "#ff7f0e", "#2ca02c"],
+        # set rainbow color scale
+        color_continuous_scale=px.colors.sequential.Rainbow,
     )
-    fig.update_traces(textposition="top center", marker=dict(size=10))
+
+    # fig.update_traces(textposition="top center", marker=dict(size=10))
     fig.update_layout(legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99))
     fig.show()
 
 
 project_and_plot(my_data.float(), V.float())
 
+# %%
+position_V = np.load("position_PCs.npy")
+position_V = torch.Tensor(position_V).to(device)
 
 # %%
-my_data = delta_stack
+def ablate_pcs(data_tensor, V, num_pcs_to_ablate):
+    """Remove only the components in the specified PCs from difference vectors"""
+    projection = data_tensor @ V[:, :num_pcs_to_ablate] @ V[:, :num_pcs_to_ablate].T
+    return data_tensor - projection
 
-my_data = my_data.reshape(my_data.shape[0], -1)
-my_data = my_data / my_data.norm(2, 1, keepdim=True)
+my_data_ablated = ablate_pcs(my_data, position_V, 24)
+ablated_U, ablated_S, ablated_V = my_data_ablated.reshape(my_data_ablated.shape[0], -1).float().svd()
+
+project_and_plot(my_data_ablated.float(), ablated_V.float())
 
 # %%
-U, S, V = my_data.reshape(my_data.shape[0], -1).float().svd()
+# Only keep the non-zero components of the ablated space
+basis = torch.cat([ablated_V[:, :3], position_V[:, :2]], dim=1)
 
-variance_explained, cumulative_variance = compute_variance_explained(S)
+# Verify orthogonality
+print("Basis orthogonality check:")
+print(torch.mm(basis.T, basis))
 
-print("Variance explained by each component:")
-for i, (var, cum_var) in enumerate(zip(variance_explained, cumulative_variance)):
-    print(f"PC {i+1}: {var:.2f}% (Cumulative: {cum_var:.2f}%)")
+# Calculate explained variance
+total_variance = (my_data**2).sum()
+projections = my_data @ basis
+variances = (projections**2).sum(dim=0)
+explained_variance = (variances / total_variance * 100).cpu()
 
+print("\nVariance explained by each basis vector:")
+for i, var in enumerate(explained_variance):
+    label = "Binding PC" if i < 2 else "Position PC"
+    print(f"{label} {i+1}: {var:.2f}%")
+print(f"\nTotal explained variance: {explained_variance.sum():.2f}%")
 
-
+# %%
+# %%
 def project_and_plot_3d(data_tensor, V):
     B = data_tensor.shape[0]
     flattened = data_tensor.reshape(B, -1)
@@ -297,10 +426,8 @@ def project_and_plot_3d(data_tensor, V):
         ),
         legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
     )
-
     fig.show()
 
-
-project_and_plot_3d(my_data.float(), V.float())
+project_and_plot_3d(my_data.float(), ablated_V.float())
 
 # %%
