@@ -16,9 +16,9 @@ os.environ["HF_TOKEN"] = "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"
 # %%
 # Load the model
 model = HookedTransformer.from_pretrained(
-    "pythia-1B",
+    # "pythia-1B",
     # "meta-llama/Llama-3.2-1B",
-    # "gemma-2-2b",
+    "gemma-2-2b",
     device=device,
     dtype=torch.bfloat16,
 )
@@ -148,6 +148,11 @@ E_next_deltas = torch.stack(
 ).mean(0)
 A_deltas = torch.stack([torch.stack(A_diff) for A_diff in A_diffs]).mean(0)
 
+# prepend zero
+E_deltas = torch.cat([torch.zeros_like(E_deltas[:1]), E_deltas])
+E_next_deltas = torch.cat([torch.zeros_like(E_next_deltas[:1]), E_next_deltas])
+A_deltas = torch.cat([torch.zeros_like(A_deltas[:1]), A_deltas])
+
 
 # %%
 # Use my_data = delta_stack to look at each class of binding vector
@@ -155,7 +160,10 @@ delta_stack = torch.cat([E_deltas, E_next_deltas, A_deltas])
 delta_stack.shape
 
 # %%
-my_data = delta_stack
+torch.save(delta_stack, "gemma-2-2b-delta-stack.pt")
+
+# %%
+my_data = E_deltas
 my_data = my_data.reshape(my_data.shape[0], -1)
 
 # %%
@@ -206,12 +214,8 @@ def plot_all_pcs(data_tensor, V, num_pcs=None):
     B = data_tensor.shape[0]
     flattened = data_tensor.reshape(B, -1)
     
-    # Center the data
-    mean = flattened.mean(dim=0, keepdim=True)
-    centered = flattened - mean
-    
     # Project onto all PCs
-    projections = centered @ V
+    projections = flattened @ V
     proj_np = projections.cpu().numpy()
     
     if num_pcs is None:
@@ -300,18 +304,15 @@ def project_and_plot(data_tensor, V):
     B = data_tensor.shape[0]
     flattened = data_tensor.reshape(B, -1)
 
-    mean = flattened.mean(dim=0, keepdim=True)
-    centered = flattened - mean
-
-    projections = centered @ V[:, :2]
+    projections = flattened @ V[:, :2]
     proj_np = projections.cpu().numpy()
 
     if V.shape[1] == 36:
         categories = ["E deltas"] * 12 + ["E+1 deltas"] * 12 + ["A deltas"] * 12
         labels = [str(i % 12 + 1) for i in range(36)]
     else:
-        categories = ["Deltas"] * 12
-        labels = [str(i + 1) for i in range(12)]
+        categories = ["Deltas"] * B
+        labels = [str(i + 1) for i in range(B)]
 
     df = pd.DataFrame(
         {
@@ -342,7 +343,7 @@ def project_and_plot(data_tensor, V):
 project_and_plot(my_data.float(), V.float())
 
 # %%
-position_V = np.load("position_PCs.npy")
+position_V = np.load("gemma-2-2b-position-PCs.npy")
 position_V = torch.Tensor(position_V).to(device)
 
 # %%
@@ -355,6 +356,12 @@ my_data_ablated = ablate_pcs(my_data, position_V, 24)
 ablated_U, ablated_S, ablated_V = my_data_ablated.reshape(my_data_ablated.shape[0], -1).float().svd()
 
 project_and_plot(my_data_ablated.float(), ablated_V.float())
+
+# print the variance explained by each PC in the ablated space
+variance_explained, cumulative_variance = compute_variance_explained(ablated_S)
+print("Variance explained by each component in ablated space:")
+for i, (var, cum_var) in enumerate(zip(variance_explained, cumulative_variance)):
+    print(f"PC {i+1}: {var:.2f}% (Cumulative: {cum_var:.2f}%)")
 
 # %%
 # Only keep the non-zero components of the ablated space
@@ -372,20 +379,16 @@ explained_variance = (variances / total_variance * 100).cpu()
 
 print("\nVariance explained by each basis vector:")
 for i, var in enumerate(explained_variance):
-    label = "Binding PC" if i < 2 else "Position PC"
+    label = "Binding PC" if basis.shape[1] - i > 2 else "Position PC"
     print(f"{label} {i+1}: {var:.2f}%")
 print(f"\nTotal explained variance: {explained_variance.sum():.2f}%")
 
-# %%
 # %%
 def project_and_plot_3d(data_tensor, V):
     B = data_tensor.shape[0]
     flattened = data_tensor.reshape(B, -1)
 
-    mean = flattened.mean(dim=0, keepdim=True)
-    centered = flattened - mean
-
-    projections = centered @ V[:, :3]
+    projections = flattened @ V[:, :3]
 
     proj_np = projections.cpu().numpy()
 
@@ -393,8 +396,8 @@ def project_and_plot_3d(data_tensor, V):
         categories = ["E deltas"] * 12 + ["E+1 deltas"] * 12 + ["A deltas"] * 12
         labels = [str(i % 12 + 1) for i in range(36)]
     else:
-        categories = ["Deltas"] * 12
-        labels = [str(i + 1) for i in range(12)]
+        categories = ["Deltas"] * B
+        labels = [str(i + 1) for i in range(B)]
 
     df = pd.DataFrame(
         {
@@ -430,4 +433,271 @@ def project_and_plot_3d(data_tensor, V):
 
 project_and_plot_3d(my_data.float(), ablated_V.float())
 
+# %%
+
+def get_pos_acts(
+    context: str,
+    positions: list[int],
+) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+    tokenized = model.tokenizer.encode(context, return_tensors="pt")
+    tokenized = tokenized.to(device)
+    _, cache = model.run_with_cache(tokenized)
+    all_acts = [[] for _ in positions]
+
+    for hook in hooks_of_interest:
+        acts = cache[hook].squeeze()
+
+        # normalize activations
+        acts /= acts.norm(2, -1, keepdim=True)
+
+        for i, pos in enumerate(positions):
+            all_acts[i].append(acts[pos])
+
+    all_acts = torch.stack([torch.stack(acts) for acts in all_acts])  # shape: [n_positions, n_layers, d_model]
+
+    return all_acts
+
+# %%
+
+all_acts = []
+# all_E_next_acts = []
+# all_A_acts = []
+
+for example in tqdm(capitals_examples[:50]):
+    acts = get_pos_acts(example.context, [E_0_POS, E_0_POS + 1, A_0_POS])
+    all_acts.append(acts)
+    # all_E_next_acts.append(E_next_acts)
+    # all_A_acts.append(A_acts)
+
+act_avg = torch.stack(all_acts).mean(0)
+E_avg = act_avg[0]
+# E_next_avg = torch.stack(all_E_next_acts).mean(0)
+# A_avg = torch.stack(all_A_acts).mean(0)
+
+# %%
+# project avgs into binding subspace and add to deltas
+binding_basis = ablated_V[:, :2]
+
+# E_0_vec = E_avg @ binding_basis @ binding_basis.T
+# E_vectors = E_deltas + E_0_vec[:, None, :]
+
+E_vectors = E_deltas + E_avg
+E_vectors = E_vectors @ binding_basis @ binding_basis.T
+
+# plot E_vectors in 3D
+project_and_plot(E_deltas.float(), binding_basis.float())
+project_and_plot(E_vectors.float(), binding_basis.float())
+
+# %%
+def binding_id_scatter(id_vectors, other_points, basis):
+    n_ids = id_vectors.shape[0]
+    n_categories = other_points.shape[1]
+    
+    # Flatten and project ID vectors
+    ids_flattened = id_vectors.reshape(n_ids, -1)
+    ids_projections = ids_flattened @ basis[:, :2]
+    ids_proj_np = ids_projections.cpu().numpy()
+
+    # Create DataFrame for ID vectors
+    df_ids = pd.DataFrame(
+        {
+            "Index": range(n_ids),
+            "PC1": ids_proj_np[:, 0],
+            "PC2": ids_proj_np[:, 1],
+            "Label": [str(i) for i in range(n_ids)],
+            "Type": "ID",
+            "Category": [f"ID_{i}" for i in range(n_ids)]
+        }
+    )
+
+    # Process and create traces for other points first
+    category_traces = []
+    for cat_idx in range(n_categories):
+        # Select points for this category and flatten
+        cat_points = other_points[:, cat_idx]
+        cat_points_flattened = cat_points.reshape(cat_points.shape[0], -1)
+        
+        # Project points
+        cat_projections = cat_points_flattened @ basis[:, :2]
+        cat_proj_np = cat_projections.cpu().numpy()
+
+        # Create trace for this category
+        cat_trace = go.Scatter(
+            x=cat_proj_np[:, 0],
+            y=cat_proj_np[:, 1],
+            mode='markers',
+            marker=dict(
+                size=5,
+                opacity=1.0,
+                color=px.colors.qualitative.Set3[cat_idx % len(px.colors.qualitative.Set3)]
+            ),
+            name=f'E_{cat_idx}',
+            legendgroup='categories',
+            legendgrouptitle_text='Activations projected onto binding subspace',
+        )
+        category_traces.append(cat_trace)
+
+    # Create separate traces for each ID with their respective colors
+    id_traces = []
+    colors = px.colors.sample_colorscale('rainbow_r', n_ids)
+    
+    for i in range(n_ids):
+        id_trace = go.Scatter(
+            x=[df_ids['PC1'][i]],
+            y=[df_ids['PC2'][i]],
+            mode='markers',
+            marker=dict(
+                color=colors[i],
+                symbol='triangle-down',
+                size=10,
+            ),
+            name=f'Extracted Entity ID Vector {i}',
+            legendgroup='ids',
+            legendgrouptitle_text='Extracted ID Vectors',
+            showlegend=True  # Show each ID in legend
+        )
+        id_traces.append(id_trace)
+
+    # Create figure and add all traces in the desired order
+    fig = go.Figure()
+    
+    # Add category traces first (they'll be on bottom)
+    for trace in category_traces:
+        fig.add_trace(trace)
+    
+    # Add ID traces last (they'll be on top)
+    for trace in id_traces:
+        fig.add_trace(trace)
+
+    # Update layout
+    fig.update_layout(
+        title="Extracted ID Vectors and Example Activations Projected onto Binding ID Subspace",
+        legend=dict(
+            yanchor="top",
+            y=1,
+            xanchor="left",
+            x=1.02,
+            title=None,
+            groupclick="toggleitem",
+            itemsizing='constant',
+            itemwidth=30,
+            entrywidth=70,
+            font=dict(size=10)
+        ),
+        showlegend=True,
+        width=900,  # Slightly wider to accommodate legend
+        height=730,  # Taller to fit all legend items
+        margin=dict(r=200)  # More right margin for legend
+    )
+
+    return fig
+
+# %%
+example_acts = []
+positions = [E_0_POS + i * N_LENGTH for i in range(13)]
+for example in tqdm(capitals_examples[:100]):
+    # get activations for E_0
+    acts = get_pos_acts(example.context, positions)
+    example_acts.append(acts)
+
+example_acts = torch.stack(example_acts)
+example_acts.shape
+# %%
+fig = binding_id_scatter(E_vectors.float(), example_acts.float(), binding_basis)
+fig.show()
+
+
+# %%
+fig.write_image("plots/gemma-2-2b_binding_id_scatter.png", scale=4)
+
+# %%
+def compute_2d_distances(query_activation, id_vectors, basis):
+    """
+    Compute Euclidean distances between a query activation and ID vectors in the 2D projected space.
+    
+    Args:
+        query_activation: tensor of shape (n_layers, d_model) or (batch, n_layers, d_model)
+        id_vectors: tensor of shape (n_ids, n_layers, d_model) - the ID vector centroids
+        basis: tensor containing the projection basis vectors
+    
+    Returns:
+        distances: tensor of shape (n_ids,) containing the Euclidean distance 
+                  from the query point to each ID vector in the 2D space
+    """
+    # Convert to float
+    query_activation = query_activation.float()
+    id_vectors = id_vectors.float()
+    basis = basis.float()
+    
+    # Handle different input shapes
+    if query_activation.dim() == 2:  # (n_layers, d_model)
+        query_activation = query_activation.unsqueeze(0)  # Add batch dim
+    
+    # Reshape query to (batch_size or 1, -1)
+    batch_size = query_activation.shape[0]
+    query_flattened = query_activation.flatten(start_dim=1)
+    query_2d = query_flattened @ basis[:, :2]  # Shape: (batch_size, 2)
+    
+    # Flatten and project ID vectors
+    ids_flattened = id_vectors.flatten(start_dim=1)  # Shape: (n_ids, -1)
+    ids_2d = ids_flattened @ basis[:, :2]  # Shape: (n_ids, 2)
+    
+    # Compute distances using broadcasting
+    # Reshape to allow broadcasting: (batch_size, n_ids, 2)
+    query_2d = query_2d.unsqueeze(1)  # Shape: (batch_size, 1, 2)
+    ids_2d = ids_2d.unsqueeze(0)      # Shape: (1, n_ids, 2)
+    
+    # Compute Euclidean distances in 2D space
+    distances = torch.sqrt(torch.sum((ids_2d - query_2d) ** 2, dim=2))  # Shape: (batch_size, n_ids)
+    
+    # If input was single example, squeeze out batch dimension
+    if distances.shape[0] == 1:
+        distances = distances.squeeze(0)
+        
+    return distances
+
+# %%
+def distance2similarity(distances, alpha=0.1):
+    return torch.nn.functional.relu(alpha - distances) / alpha
+
+for i in range(10):
+    try_act = example_acts[i, 1]
+    dists = compute_2d_distances(try_act, E_vectors, binding_basis)
+    sims = distance2similarity(dists, alpha=0.1)
+    print(sims)
+# %%
+def get_all_position_acts(tokens):
+    _, cache = model.run_with_cache(tokens)
+    all_acts = [[] for _ in range(tokens.shape[-1])]
+    for hook in hooks_of_interest:
+        acts = cache[hook].squeeze()
+        acts /= acts.norm(2, -1, keepdim=True)
+        for i in range(tokens.shape[-1]):
+            all_acts[i].append(acts[i])
+    all_acts = torch.stack([torch.stack(acts) for acts in all_acts])
+    return all_acts
+
+# %%
+# test_context = capitals_examples[0].context
+test_context = """\
+A Day at the Park
+
+Emma has blonde hair that shines in the sunlight. She was waiting at the park for her friends. Thomas is a tall boy with curly hair. He always brings his blue backpack to the playground.
+
+Maria has red sneakers that she wears every day. When she arrived at the park, she saw that Thomas was sitting on the rusty swing. The old oak tree has thick branches that stretch over the playground. 
+
+The three friends played until the sky was orange and the air was cool."""
+
+tokenized = model.tokenizer.encode(test_context, return_tensors="pt")
+all_acts = get_all_position_acts(tokenized)  # ctx_len, n_layers, d_model
+all_acts.shape
+distances = compute_2d_distances(all_acts, E_vectors, binding_basis)
+sims = distance2similarity(distances, alpha=0.1)
+
+for i, token in enumerate(tokenized[0]):
+    sim = sims[i]
+    entity_hit = sim.sum() > 0
+    entity_id = torch.argmax(sim).item() if entity_hit else -1
+    entity_str = f"E_{entity_id} " if entity_hit else "    "
+    print(f"{entity_str} {repr(model.tokenizer.decode(token))}")
 # %%

@@ -13,12 +13,14 @@ torch.set_grad_enabled(False)
 import os
 os.environ["HF_TOKEN"] = "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"
 
+model_name = "gemma-2-2b"
+
 # %%
 # Load the model
 model = HookedTransformer.from_pretrained(
-    "pythia-1B",
+    # "pythia-1B",
     # "meta-llama/Llama-3.2-1B",
-    # "gemma-2-2b",
+    model_name,
     device=device,
     dtype=torch.bfloat16,
 )
@@ -30,7 +32,9 @@ for hook in model.hook_dict.keys():
     if "hook_resid_pre" in hook:
         hooks_of_interest.append(hook)
 
-LAYERS = [10]
+# %%
+
+LAYERS = [20]
 hooks_of_interest = hooks_of_interest[LAYERS[0]:LAYERS[-1] + 1]
 hooks_of_interest
 
@@ -55,13 +59,25 @@ def get_activation_difference(
 
 
 # %%
+import datasets
+my_dataset = datasets.load_dataset(
+    "monology/pile-uncopyrighted",
+    split="train",
+    # shuffle=True,
+    streaming=True,
+)
+my_data_iter = iter(my_dataset)
+
+# %%
 
 diffs = []
 n_examples = 6000
-for example in tqdm(range(n_examples)):
-    tokenized = torch.randint(1, 50265, (1, 200))
-    ctx = model.tokenizer.decode(tokenized[0])
-    tokenized = model.tokenizer.encode(ctx, return_tensors="pt").to(device)[:, :128]
+for _ in tqdm(range(n_examples)):
+    # tokenized = torch.randint(1, 50265, (1, 200))
+    # ctx = model.tokenizer.decode(tokenized[0])
+    # tokenized = model.tokenizer.encode(ctx, return_tensors="pt").to(device)[:, :128]
+    example = next(my_data_iter)
+    tokenized = model.tokenizer.encode(example["text"], return_tensors="pt", max_length=256).to(device)
     diff = get_activation_difference(tokenized)
     diffs.append(diff)
 diffs = torch.stack(diffs)
