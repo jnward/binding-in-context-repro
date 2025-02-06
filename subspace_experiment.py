@@ -7,7 +7,7 @@ from tasks.capitals import CAPITAL_MAP, NAMES, capitals_generator
 from functools import partial
 from tqdm import tqdm
 
-device = "mps"
+device = "cuda"
 torch.set_grad_enabled(False)
 
 import os
@@ -15,22 +15,26 @@ os.environ["HF_TOKEN"] = "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"
 
 # %%
 # Load the model
+model_name = "gemma-2-2b"
+
 model = HookedTransformer.from_pretrained(
     # "pythia-1B",
     # "meta-llama/Llama-3.2-1B",
-    "gemma-2-2b",
+    model_name,
     device=device,
     dtype=torch.bfloat16,
+    center_unembed=False,
+    center_writing_weights=False,
 )
 
 # %%
 # We want to get all the pre-transformer activations in the residual stream
 hooks_of_interest = []
 for hook in model.hook_dict.keys():
-    if "hook_resid_pre" in hook:
+    if "hook_resid_post" in hook:
         hooks_of_interest.append(hook)
 
-LAYERS = [10]
+LAYERS = [12]
 hooks_of_interest = hooks_of_interest[LAYERS[0]:LAYERS[-1] + 1]
 
 # N is the number of binding examples in each context
@@ -160,7 +164,7 @@ delta_stack = torch.cat([E_deltas, E_next_deltas, A_deltas])
 delta_stack.shape
 
 # %%
-torch.save(delta_stack, "gemma-2-2b-delta-stack.pt")
+torch.save(delta_stack, f"{model_name}-delta-stack.pt")
 
 # %%
 my_data = E_deltas
@@ -343,8 +347,8 @@ def project_and_plot(data_tensor, V):
 project_and_plot(my_data.float(), V.float())
 
 # %%
-position_V = np.load("gemma-2-2b-position-PCs.npy")
-position_V = torch.Tensor(position_V).to(device)
+position_V = np.load(f"{model_name}-position-PCs.npy")
+position_V = torch.Tensor(position_V).to(device).bfloat16()
 
 # %%
 def ablate_pcs(data_tensor, V, num_pcs_to_ablate):
@@ -365,7 +369,7 @@ for i, (var, cum_var) in enumerate(zip(variance_explained, cumulative_variance))
 
 # %%
 # Only keep the non-zero components of the ablated space
-basis = torch.cat([ablated_V[:, :3], position_V[:, :2]], dim=1)
+basis = torch.cat([ablated_V[:, :3], position_V[:, :2]], dim=1).bfloat16()
 
 # Verify orthogonality
 print("Basis orthogonality check:")
@@ -476,13 +480,15 @@ E_avg = act_avg[0]
 
 # %%
 # project avgs into binding subspace and add to deltas
-binding_basis = ablated_V[:, :2]
+binding_basis = ablated_V[:, :2].bfloat16()
 
 # E_0_vec = E_avg @ binding_basis @ binding_basis.T
 # E_vectors = E_deltas + E_0_vec[:, None, :]
 
 E_vectors = E_deltas + E_avg
 E_vectors = E_vectors @ binding_basis @ binding_basis.T
+
+torch.save(E_vectors.float(), f"{model_name}-E-vectors.pt")
 
 # plot E_vectors in 3D
 project_and_plot(E_deltas.float(), binding_basis.float())
@@ -603,12 +609,44 @@ for example in tqdm(capitals_examples[:100]):
 example_acts = torch.stack(example_acts)
 example_acts.shape
 # %%
-fig = binding_id_scatter(E_vectors.float(), example_acts.float(), binding_basis)
+fig = binding_id_scatter(E_vectors.float(), example_acts.float(), binding_basis.float())
 fig.show()
 
 
 # %%
-fig.write_image("plots/gemma-2-2b_binding_id_scatter.png", scale=4)
+fig.write_image(f"plots/{model_name}_binding_id_scatter.png", scale=4)
+
+# %%
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # %%
 def compute_2d_distances(query_activation, id_vectors, basis):

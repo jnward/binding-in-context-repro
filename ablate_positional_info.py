@@ -7,7 +7,7 @@ from tasks.capitals import CAPITAL_MAP, NAMES, capitals_generator
 from functools import partial
 from tqdm import tqdm
 
-device = "mps"
+device = "cuda"
 torch.set_grad_enabled(False)
 
 import os
@@ -23,6 +23,8 @@ model = HookedTransformer.from_pretrained(
     model_name,
     device=device,
     dtype=torch.bfloat16,
+    center_unembed=False,
+    center_writing_weights=False,
 )
 
 # %%
@@ -77,12 +79,15 @@ for _ in tqdm(range(n_examples)):
     # ctx = model.tokenizer.decode(tokenized[0])
     # tokenized = model.tokenizer.encode(ctx, return_tensors="pt").to(device)[:, :128]
     example = next(my_data_iter)
-    tokenized = model.tokenizer.encode(example["text"], return_tensors="pt", max_length=256).to(device)
+    tokenized = model.tokenizer.encode(example["text"], return_tensors="pt").to(device)
+    tokenized = tokenized[:, :128]
+    if tokenized.shape[1] < 128:
+        continue
     diff = get_activation_difference(tokenized)
     diffs.append(diff)
-diffs = torch.stack(diffs)
 
 # %%
+diffs = torch.stack(diffs)
 deltas = diffs.mean(0)
 deltas.shape
 # %%
@@ -107,7 +112,7 @@ U, S, V = my_data.reshape(my_data.shape[0], -1).float().svd()
 import plotly.express as px
 
 # plot "weights" of each element of the first two singular vectors
-px.line(V.float().cpu()[:, :2])
+# px.line(V.float().cpu()[:, :2])
 
 
 # %%
@@ -232,8 +237,8 @@ def plot_all_pcs(data_tensor, V, num_pcs=None):
     return fig
 
 # Example usage:
-fig = plot_all_pcs(my_data.float(), V.float(), num_pcs=10)
-fig.show()
+# fig = plot_all_pcs(my_data.float(), V.float(), num_pcs=10)
+# fig.show()
 
 
 
@@ -308,7 +313,7 @@ def ablate_pcs(data_tensor, V, num_pcs_to_ablate):
 
     return deltas_ablated
 
-deltas_ablated = ablate_pcs(my_data, V, 16)
+deltas_ablated = ablate_pcs(my_data.float(), V, 16)
 
 fig = project_and_plot(deltas_ablated.float(), V.float())
 # fig.show()# 
@@ -322,5 +327,5 @@ for i, (var, cum_var) in enumerate(zip(ablated_variance_explained, ablated_cumul
 project_and_plot(deltas_ablated.float(), ablated_V.float()).show()
 # %%
 import numpy as np
-np.save("position_PCs.npy", V.cpu().numpy())
+np.save(f"{model_name}-position-PCs.npy", V.cpu().numpy())
 # %%
